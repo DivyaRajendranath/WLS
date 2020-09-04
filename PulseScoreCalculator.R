@@ -1,279 +1,224 @@
-#install.packages("log4r")
+library('data.table')
 library('dplyr')
 library('tidyverse')
 library('lubridate')
-library(ggplot2)
-library(log4r)
+library('recommenderlab')
+library('stringr')
+#-----------------------------------------------
+# 1. Read the Synthetic tag data file for assessment data
+#-----------------------------------------------
+test = load(file = "C:/Divya/NUS Course Materials/FYP/SampleCode/SecondDataSet/assessments_with_tags.RData")
+df = melt(question_data6, id.vars = c("question_id","country","org_id","role_id","submission_utc_ts","no_of_trials","points_earned","masked_user_id"))
+names(df)[10] = "question_tags"
+df = within(df, rm("variable"))
+# original KUSHAL question activity data set
+# dt_dump = fread("C:/Divya/NUS Course Materials/FYP/SampleCode/SecondDataSet/user_assessments.csv")
+# dt = as.data.frame(dt_dump)
 
-#--------------------------------------------
-my_logfile = "C:/Divya/NUS Course Materials/FYP/SampleCode/PulseScoreLogs.txt"
-#my_console_appender = console_appender(layout = default_log_layout())
-my_file_appender = file_appender(my_logfile, append = TRUE)
-my_logger <- log4r::logger(threshold = "INFO", appenders= list(my_file_appender))
-info(my_logger, paste("Here is the log message "))
-#--------------------------------------------
+# consider on Great Britain
+gb = df %>%
+  filter(country == 'GB') 
+dim(gb)
+#585144
 
+# use data tables
+dt_dump = as.data.table(gb)
+dt_dump = na.omit(dt_dump)
+dt_dump[, eval("answer_datetime"):=ymd_hms(dt_dump$submission_utc_ts)]
+dt_dump[, eval("answer_date"):=as_date(dt_dump$answer_datetime)]
+dt_dump[,.N, country][order(-N)]
+# total question activity records in GB: 353108
+#-----------------------------------------------
+# Question Tag Master
+#-- ---------------------------------------------
+dt_questions_fullset = unique(dt_dump[,.(question_id, question_tags)]) #2630 unique questions & tag combinations
+dt_questions_fullset[,qFreq:=.N, by=question_id]
+dt_questions_fullset[,tFreq:=.N, by=question_tags]
+#3891 question id, with qFreq=4, tFreq=2,24,62
+dt_questions_fullset[,diff_level:=ifelse(round((1/qFreq) * (1/tFreq),2) <= 0, 
+                                         0.01,
+                                         round((1/qFreq) * (1/tFreq),2)), by=question_tags]
+dt_tag_fullset = dt_questions_fullset[,.N, by=question_tags] #379 unique tags
+df_tag_fullset = as.data.frame(dt_tag_fullset)
 
-dump = read.csv("C:/Divya/NUS Course Materials/FYP/SampleCode/SecondDataSet/user_assessments.csv")
-dump %>%
-  group(country, question_id) %>%
-  summarise(n=n())
-
-# TOTAL 1596 questions
-#TOTAL 295 tags
-str(dump)
-dim(dump)
-india_sample = dump %>%
-  filter(country == "IN")
-dim(india_sample)
-#  1295290       9
-india_sample = india_sample[, c("question_id","question_tags","masked_user_id","no_of_trials","points_earned","submission_utc_ts")]
-india_sample = india_sample[!duplicated(india_sample),]
-dim(india_sample)
-# 1290148       9
-india_sample$answer_datetime = ymd_hms(india_sample$submission_utc_ts)
-india_sample$answer_date = as.Date(india_sample$answer_datetime)
-str(india_sample)
-dim(india_sample)
-#  1290148       8
-
-# ------------------- Check the QM counts ------------------
-qm = india_sample %>%
-  group_by(question_id, question_tags) %>%
-  filter(n() == 1) %>%
-  select(question_id, question_tags)
-# india questions 519
-
-qm %>%
-  group_by(question_tags) %>%
-  summarise(n=n()) %>%
-  arrange(desc(n))
-# ------------------- Check the QM counts ------------------
-
-
-final_india_sample = india_sample %>%
-  group_by(masked_user_id, answer_date, question_id,question_tags) %>%
-  summarise(no_of_trials = no_of_trials[which.max(answer_datetime)], 
-            points_earned = points_earned[which.max(answer_datetime)])
-dim(final_india_sample)
-#   944137      6
-str(final_india_sample)
-final_india_sample$no_of_trials
-length(unique(final_india_sample$question_id))
-#921
-length(unique(final_india_sample$question_tags))
-#245
-length(unique(final_india_sample$masked_user_id))
-#8620
-
-# total number of questions answered by users
-final_india_sample %>%
-  group_by(masked_user_id, question_tags)%>%
-  summarise(n=n()) %>%
-  arrange(desc(n))
-# 1eff6bf0        5530
-# 9ca4acb0        3809
-# 4e234be9        3707
-#masked_user_id question_tags     n
-# 1eff6bf0       tag-e442f041    850
-# 4e234be9       tag-e442f041    817
-# 4e234be9       tag-e5809a76    489
-# 1eff6bf0       tag-e0cf8cf3    434
-# 1eff6bf0       tag-e5809a76    371
-
-str(final_india_sample)
-#---------------------------------
-# Question Master
-#---------------------------------
-india_qm = final_india_sample %>%
-  group_by(question_id, question_tags) %>%
-  summarise(n = n()) %>%
-  select(question_id, question_tags) 
-
-#---------------------------------
-# Difficulty level
-#---------------------------------
-diff_level = final_india_sample %>%
-  group_by(question_id, question_tags) %>%
-  summarise(correct_count = sum(points_earned),
-            attempt_count = (sum(no_of_trials)*10),
-            diff = (1 - correct_count/attempt_count))
-  
-#-----------------------------------
-# Tag level paramters - Qcnt, Qlvl, K
-#-----------------------------------
-# find how many questions are there in each question tag
-india_qtag_qcnt = india_qm %>%
-  group_by(question_tags) %>%
-  summarise(qcnt = n())
-
-partitions = c(0,10,20,30,40,50,60,70,80,90,100)
-bands = c(10,20,30,40,50,60,70,80,90,100)
-india_qtag_qcnt$qLvl <- cut(india_qtag_qcnt$qcnt, breaks = partitions, labels = bands)
+partitions = seq(0,2400, 10)
+bands = seq(10,2400, 10)
+df_tag_fullset$qLvl <- cut(df_tag_fullset$N, breaks = partitions, labels = bands)
 
 kValues = NULL
 for (x in 1:length(bands)) {
-  print(bands[x])
   kValues[x] = round((log(0.05/0.95))/(-(bands[x]-1)), 4)
 }
 kSet=NULL
 kSet = data.frame(bands, kValues)
-
-india_qtag_qcnt$k = sapply(india_qtag_qcnt$qLvl, function(y) kSet[kSet$bands == y, 2])
-
+df_tag_fullset$k = sapply(df_tag_fullset$qLvl, function(y) kSet[kSet$bands == y, 2])
 #-----------------------------------
 # Penalty factor
 #-----------------------------------
-plist = list()
-scaleValue = list()
-for(r in 1:nrow(kSet)) {
-  qLvl = kSet[r,"bands"]  
-  k = kSet[r,"kValues"]
-  #print(qLvl)
-  #print(k)
-  penalty_set = array(0.5, dim=c(qLvl, 1, 1))
+df_tag_penalty_set = data.frame()
+for(z in 1:nrow(kSet)) {
+  lvl = kSet[z, "bands"]
+  k = kSet[z, "kValues"]
+  penalty_set = array(0.5, dim=c(lvl, 1, 1))
   for(i in 2:length(penalty_set)) {
     penalty_set[i] = round(1/(1 + exp((-k)* (i-1))),4)
   }
-  scaleValue = append(scaleValue, round(sum(penalty_set)/qLvl,4))
-  plist = append(plist, list(penalty_set))
+  scaleValue = round(sum(penalty_set)/lvl,4)
+  penalty_map = data.frame(bands=rep(lvl,lvl),sid=1:lvl, penalty=penalty_set, qPoolScale=rep(scaleValue,lvl))
+  df_tag_penalty_set=rbind(df_tag_penalty_set,penalty_map)
 }
-str(kSet)
-kSet$penalty = plist
-kSet$scale = scaleValue
-india_qtag_qcnt$penaltylist = sapply(india_qtag_qcnt$qLvl, function(y) kSet[kSet$bands == y, 3])
-india_qtag_qcnt$scale = sapply(india_qtag_qcnt$qLvl, function(y) kSet[kSet$bands == y, 4])
-
-#-------------------------------------------------------------
-# Penalised Pulse Score
-#-------------------------------------------------------------
-head(india_qtag_qcnt)
-head(kSet)
-
-#-------------------------full india user set for pulse score ---------------------
-correct_ans_india = final_india_sample[final_india_sample$points_earned == 10,]
-dim(correct_ans_india)
-
-users_uniqques = correct_ans_india %>%
-  group_by(masked_user_id, question_id,question_tags) %>%
-  summarise(no_of_trials = no_of_trials[which.max(answer_date)], 
-            points_earned = points_earned[which.max(answer_date)],
-            answer_date = max(answer_date)) %>%
-  arrange(answer_date)
-
-# find unique tags
-users_uniqtag = users_uniqques %>%
-  group_by(masked_user_id, question_tags) %>%
-  summarise(n=n())
-
-#users_uniqques = users_uniqques[users_uniqques$masked_user_id %in% c("0007bfe1","11776ae8","f2c11944","027fa47b","1df6e005"),]
-
-
-
-#-------------------------full india user set for pulse score ---------------------
-master=NULL
-cnames = c("userid", "qtag","pulsescore")
-master = data.frame(matrix(ncol=3))
-#master = data.frame()
-names(master) = cnames
-
-#india_qtag_qcnt$scale = sapply(india_qtag_qcnt$qLvl, function(y) kSet[kSet$bands == y, 4])
-# how many tags have qCnts=1, so that i can use sapply function
-qTag_WithSingleQCnt = users_uniqtag %>%
-  filter(n==1)
-
-qId_WithSingleQCnt  = inner_join(users_uniqques, qTag_WithSingleQCnt, by = c("question_tags", "masked_user_id")) %>%
-  select("masked_user_id", "question_id", "question_tags")
-
-qId_WithSingleQCnt$pulsescore = sapply(qId_WithSingleQCnt, function(x,y,z){
-  diff_level[diff_level$question_id == y & diff_level$question_tags == z,5]%>%pull()
-  #penScale = india_qtag_qcnt[india_qtag_qcnt$question_tags == qId_WithSingleCnt$question_tags, 6] %>% pull()
-  #difLvl = diff_level[diff_level$question_id == qId & diff_level$question_tags == qtag, 5] %>% pull()
-  
-})
-                                       
-for(i in 1:nrow(users_uniqtag)) {
-  info(my_logger, paste("------------------- For loop --------------"))
-  u = users_uniqtag[i,"masked_user_id"] %>% pull()
-  u = as.character(u)
-  info(my_logger, paste("User : ", u))
-  qtag = users_uniqtag[i,"question_tags"] %>% pull()
-  qtag = as.character(qtag)
-  qCnt = users_uniqtag[i,"n"] %>% pull()
-  userSet = users_uniqques[users_uniqques$masked_user_id == u & users_uniqques$question_tags == qtag,]
-  if (qCnt==1) {
-    info(my_logger, paste("Question count: 1 : tag = ", qtag))
-    qId = userSet[, 2] %>% pull()
-    #n = users_uniqques[users_uniqques$masked_user_id == u & users_uniqques$question_id == qId, 4] %>% pull()
-    #p = users_uniqques[users_uniqques$masked_user_id == u & users_uniqques$question_id == qId, 5]  %>% pull()
-    pf = india_qtag_qcnt[india_qtag_qcnt$question_tags == qtag, 5]  %>% pull()
-    ps = india_qtag_qcnt[india_qtag_qcnt$question_tags == qtag, 6] %>% pull()
-    d = diff_level[diff_level$question_id == qId & diff_level$question_tags == qtag, 5] %>% pull()
-    pps = (as.numeric(pf[[1]][1]) * as.numeric(d))/as.numeric(ps)
-    info(my_logger, paste("Question count: 1 : id =  ", qId))
-    master = rbind(master, c(u, qtag, round(pps,4)))
-  } else {
-    qIdArr = userSet[, 2] %>% pull()
-    qnum = length(qIdArr)
-    info(my_logger, paste("= * = * = "))
-    info(my_logger, paste("Question count: MORE THAN 1 : tag = ", qtag))
-    info(my_logger, paste("Question count: MORE THAN 1 : qCount  = ", qnum))
-    pf = india_qtag_qcnt[india_qtag_qcnt$question_tags == qtag, 5]  %>% pull()
-    pfVal=0
-    ppsVal = 0
-    for (n in 1:qnum) {
-      pfVal = as.numeric(pf[[1]][n])
-      d = diff_level[diff_level$question_id == qIdArr[n] & diff_level$question_tags == qtag, 5] %>% pull()
-      info(my_logger, paste("Question Iteration = ",n))
-      info(my_logger, paste("Question Id = ",qIdArr[n]))
-      info(my_logger, paste("Penalty factor = ",pfVal))
-      info(my_logger, paste("Diff level = ",d))
-      ppsVal = ppsVal + (as.numeric(d) * pfVal)
-      print(ppsVal)
-      info(my_logger, paste("= * = * = "))
-    }
-    ps = india_qtag_qcnt[india_qtag_qcnt$question_tags == qtag, 6] %>% pull()
-    pps = (ppsVal/qnum)/(as.numeric(ps))
-    info(my_logger, paste("Question count: MORE THAN 1 PPS :",pps))
-    master = rbind(master, c(u, qtag, round(pps,4)))
-    info(my_logger, paste("= * = * = "))
-  }
+df_expanded_tag_set = data.frame()
+for(y in 1:nrow(df_tag_fullset)) {
+  tag = df_tag_fullset[y, "question_tags"]
+  lvl = as.numeric(as.character(df_tag_fullset[y,"qLvl"]))
+  tag_set = cbind(question_tags=rep(tag,lvl), df_tag_penalty_set[df_tag_penalty_set$bands==lvl,])
+  df_expanded_tag_set=rbind(df_expanded_tag_set, tag_set)
 }
 
-write.csv(master, "C:/Divya/NUS Course Materials/FYP/SampleCode/master.csv")
-#--------------------------
-t = length(unique(india_qtag_qcnt$question_tags))
-m = length(unique(final_india_sample$masked_user_id))
-
-tagNames = array(unique(india_qtag_qcnt$question_tags))
-users = array(unique(final_india_sample$masked_user_id))
-
-test = data.frame(matrix(rep(0,m*t), nrow=m, ncol=t))
-names(test) = tagNames
-row.names(test) = users
-
-#--------------------------
-
-cq_user_ecf5aad3 = user_ecf5aad3 %>%
-  filter(points_earned == 10) %>%
-  group_by(question_id, question_tags) %>%
-  filter(n() == 1)
+#---------------------------------------------------------
+# Country specific changes
+#---------------------------------------------------------
+country_list = unique(dt_dump[,country])
+country_list = country_list[!is.na(country_list)]
+country_list = country_list[country_list != ""]
+file_path = "C:/Divya/NUS Course Materials/FYP/SampleCode/SecondDataSet/output/pulse_score.csv"
+for (c in country_list) {
+  c = trimws(c, which = c("both"))
+  print(paste("Start of Processing: " , c, "...."))
   
-  summarise(answer_date = answer_date[which.max(answer_date)])
+  # 2. Consider only US data
+  dt_cntry_full_data = unique(dt_dump[country == c])
+  cntDataSet = nrow(dt_cntry_full_data) #185269
+  print(paste("Number of unique records in ", c, ": ", cntDataSet))
+  # 3. Remove repeated occurrence of same question id and question tags within the same date for every user
+  dt_cntry_full_data = dt_cntry_full_data[, .SD[which.max(answer_datetime)], 
+                                        by=c("masked_user_id", "answer_date", "question_id","question_tags")]
+  #nrow(dt_cntry_full_data)
+  # 138113
+  #unique(dt_cntry_full_data[,.N, c("no_of_trials","points_earned")])[order(no_of_trials)]
+  #unique(dt_cntry_full_data[(points_earned == 10 | points_earned == 5),.N, c("points_earned","no_of_trials")])
+
+  # 4. Consider '10' points_earned only
+  dt_correct_ans = dt_cntry_full_data[points_earned == 10 | points_earned == 5,]
+  #nrow(dt_correct_ans) #105777 #117364
   
-  group_by(masked_user_id, answer_datet, question_id,question_tags) %>%
-  summarise(no_of_trials = no_of_trials[which.max(answer_datetime)], 
-            points_earned = points_earned[which.max(answer_datetime)])
+  # 5. Remove repeated questions answered by users in the past.
+  #    Consider only the most recently answered correct questions, 
+  #    with no repetition of same question id = tag for same user
+  dt_final_user_ques_set = dt_correct_ans[,
+                                        .SD[which.max(answer_date)],
+                                        by=c("masked_user_id","question_id","question_tags")][order(masked_user_id, answer_date)]
+  #dim(dt_final_user_ques_set) #87311 #96514
+  
+  #dt_final_user_ques_set[,.N, c("masked_user_id","question_id","question_tags")][order(-N)]
+  dt_final_user_ques_set = dt_final_user_ques_set[,sid:=seq_along(answer_date),by=c("masked_user_id","question_tags")]
+  #dim(dt_final_user_ques_set) #87311 #96514
+  #unique(dt_final_user_ques_set[,no_of_trials])
+  
+  dt_final_user_ques_set[,c("submission_utc_ts","answer_datetime"):=NULL]
+  #dt_final_user_ques_set[,.N,by=c("masked_user_id")][order(-N)]
+  
+  df_ps_comp_set = merge(dt_final_user_ques_set,df_expanded_tag_set, by=c("question_tags","sid"), all = TRUE)
+  df_ps_comp_set=na.omit(df_ps_comp_set)
+  df_ps_comp_set[,penalty:= ifelse(points_earned<10, round(penalty/2,4), penalty)]
+  
+  #---------------------------------
+  # Difficulty level
+  #---------------------------------
+  #dt_question_data = dt_final_user_ques_set[,.(question_id, question_tags, points_earned, no_of_trials)]
+  #df_question_data = as.data.frame(dt_question_data)
+  #df_question_diff_level =  df_question_data %>%
+  #  group_by(question_id, question_tags) %>%
+  #  summarise(correct_count = sum(points_earned),
+  #            attempt_count = (sum(no_of_trials)*10),
+  #            diff = round(1 - correct_count/attempt_count,3))
+  df_question_diff_level = as.data.frame(dt_questions_fullset)
+  df_question_diff_level$qFreq = NULL
+  df_question_diff_level$tFreq = NULL
+  df_ps_comp_set = merge(df_ps_comp_set,df_question_diff_level, by=c("question_tags","question_id"), all = TRUE)
+  df_ps_comp_set=na.omit(df_ps_comp_set)
+  #df_ps_comp_set[,c("correct_count","attempt_count","sid"):=NULL]
+  df_ps_comp_set[,.N,by=c("masked_user_id","question_tags")]
+  #32868 #34274
+  df_ps_comp_set[,score:=round((sum(penalty * diff_level)/.N)/qPoolScale,4),by=c("masked_user_id","question_tags")]
+  df_final_ps_score_set = unique(df_ps_comp_set[,list(masked_user_id,question_tags,score)])
+  
+  write.table(df_final_ps_score_set,file_path,append = TRUE, col.names = TRUE, sep = ",", quote = FALSE) 
+  print(paste("Pulse score output file: ", file_path))
+  print(paste("End of Processing: ", c))
+  print(paste("----------------------------------------------"))
+}
 
+#-----------------------------------------------------------------
+# UPSKILL RECOMMENDER
+#-----------------------------------------------------------------
 
-user_3316e33a = final_india_sample[final_india_sample$masked_user_id == "3316e33a",]
+df_final_ps_score_set %>%
+  filter(score<=0) %>%
+  count()
 
-user_1c6fd02b = final_india_sample[final_india_sample$masked_user_id == "1c6fd02b",]
+min(df_final_ps_score_set$score)
+max(df_final_ps_score_set$score)
 
-user_2f42c4fe = final_india_sample[final_india_sample$masked_user_id == "2f42c4fe",]
+v_users = unique(df_final_ps_score_set$masked_user_id)
+length(v_users)
+#1396 users
+df_users = data.frame(v_users, c(1:length(v_users)))
+colnames(df_users) = c("masked_user_id","user_id")
+v_tags = unique(df_final_ps_score_set$question_tags)
+length(v_tags)
+#379 tags
+df_items = data.frame(v_tags, c(1:length(v_tags)))
+colnames(df_items) = c("question_tags","item_id")
 
-# ecf5aad3   32
-# 3316e33a   72
-# 2f42c4fe  200
-# 1c6fd02b  502
+total_users_cnt = length(unique(df_final_ps_score_set$masked_user_id))
+test_users_cnt = round(0.1 * total_users_cnt,0)
+train_users_cnt = total_users_cnt - test_users_cnt
+v_test_users = tail(v_users,test_users_cnt)
+v_train_users = tail(v_users,train_users_cnt)
 
+df_train_set = df_final_ps_score_set[df_final_ps_score_set$masked_user_id %in% v_train_users,]
+df_train_set = merge(df_train_set, df_users, by="masked_user_id", all = TRUE)
+df_train_set = merge(df_train_set, df_items, by="question_tags", all = TRUE)
+df_train_set = na.omit(df_train_set)
+dim(df_train_set)
+# 65725
+df_test_set = df_final_ps_score_set[df_final_ps_score_set$masked_user_id %in% v_test_users,]
+df_test_set = merge(df_test_set, df_users, by="masked_user_id", all = TRUE)
+df_test_set = merge(df_test_set, df_items, by="question_tags", all = TRUE)
+df_test_set = na.omit(df_test_set)
+dim(df_test_set)
+#2537
+
+#-----------------------------------------------------------------
+# Recosystem - Matrix Factorization
+#-----------------------------------------------------------------
+library(recosystem)
+set.seed(123)
+
+train_data = data_memory(df_train_set$user_id, df_train_set$item_id, df_train_set$score)
+test_data = data_memory(df_test_set$user_id, df_test_set$item_id)
+r = Reco()
+model = r$tune(train_data = train_data, opts = list(dim = c(10,20,30),
+                                                    lrate = c(0.1,0.2),
+                                                    costp_l1 = 0,
+                                                    costq_l1 = 0,
+                                                    nthread = 1,
+                                                    niter = 10))
+model
+r$train(train_data, opts = c(model$min, nthread = 1, niter = 10))
+pred_file = tempfile()
+pred_score = r$predict(test_data = test_data, out_memory())
+
+df_eval_test_set = cbind(df_test_set, pred_score)
+#diff between original and predicted
+df_eval_test_set$sq_err = (df_eval_test_set$score - df_eval_test_set$pred_score)**2
+total_error = sqrt(sum(df_eval_test_set$sq_err))
+# error = 0.6111
+
+recomm_tags = df_eval_test_set %>%
+  arrange(desc(pred_score)) %>%
+  group_by(masked_user_id) %>%
+  slice(1:5)
+
+write.csv(recomm_tags, "C:/Divya/NUS Course Materials/FYP/SampleCode/SecondDataSet/output/upskill_recommendations.csv")
